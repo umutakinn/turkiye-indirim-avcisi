@@ -18,25 +18,28 @@ if not TOKEN or not CHAT_ID:
 
 MIN_DISCOUNT = 10
 MAX_SEEN = 5000
+MAX_ALERTS_PER_RUN = 5
 SEEN_FILE = Path("seen.json")
-USER_AGENT = "IndirimAvcisiTR/1.1 (+public RSS reader)"
+USER_AGENT = "IndirimAvcisiTR/1.2 (+public RSS reader)"
 
 FEEDS = [
     ("DonanımHaber", "https://www.donanimhaber.com/rss/tum/"),
 ]
 
 QUERIES = [
-    "Türkiye indirim fırsat kampanya",
-    "Trendyol indirim fırsat",
-    "Hepsiburada indirim fırsat",
-    "Amazon Türkiye indirim fırsat",
-    "N11 indirim fırsat",
-    "elektronik telefon bilgisayar indirim",
-    "ev yaşam mutfak mobilya indirim",
-    "giyim ayakkabı kozmetik indirim",
-    "market süpermarket bebek ürünleri indirim",
-    "otomotiv oto aksesuar yapı market indirim",
+    "Türkiye ürün indirim kampanya fırsat",
+    "Trendyol ürün indirim kupon",
+    "Hepsiburada ürün indirim kampanya",
+    "Amazon Türkiye ürün indirim kampanya",
+    "N11 ürün indirim kupon",
+    "telefon bilgisayar tablet elektronik indirim",
+    "televizyon beyaz eşya ev aletleri indirim",
+    "mobilya ev yaşam mutfak indirim",
+    "giyim ayakkabı çanta kozmetik indirim",
+    "market süpermarket temizlik bebek ürünleri indirim",
+    "otomotiv lastik oto aksesuar indirim",
     "spor outdoor oyuncak kitap indirim",
+    "uçak bileti otel seyahat kampanya indirim",
 ]
 
 for query in QUERIES:
@@ -51,6 +54,47 @@ for query in QUERIES:
 PRICE_RE = re.compile(
     r"(?<!\d)(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)",
     re.IGNORECASE
+)
+
+# Yüzde oranı geçse bile alışveriş indirimi sayılmayacak haber konuları.
+NON_SHOPPING_TERMS = (
+    "sevkiyat", "pazar payı", "gelirleri", "toplam gelir", "ciro kaybı",
+    "gelir kaybı", "satışları düştü", "satış düşüşü", "yüzde düşüş",
+    "oranında düşüş", "geriledi", "geriliyor", "kan kaybediyor",
+    "kayıp yaşadı", "işten çıkarma", "işsizlik", "enflasyon",
+    "faiz indirimi", "vergi indirimi", "emekli maaşı", "sgk desteği",
+    "eğitimde indirim", "okul kampüsü", "sınav indirimi"
+)
+
+# Alışverişe konu olabilecek ürün/hizmet ifadeleri.
+SHOPPING_TERMS = (
+    "telefon", "akıllı telefon", "iphone", "samsung", "xiaomi",
+    "bilgisayar", "laptop", "notebook", "tablet", "ekran kartı",
+    "işlemci", "playstation", "ps5", "xbox", "oyun konsolu",
+    "televizyon", "tv ", "monitör", "kulaklık", "kamera",
+    "beyaz eşya", "buzdolabı", "çamaşır makinesi", "bulaşık makinesi",
+    "süpürge", "küçük ev aleti", "mobilya", "koltuk", "yatak",
+    "mutfak", "ev tekstili", "giyim", "ayakkabı", "çanta",
+    "kozmetik", "parfüm", "cilt bakım", "market", "süpermarket",
+    "temizlik ürünü", "bebek bezi", "bebek ürünü", "mama",
+    "lastik", "oto aksesuar", "araç bakım", "yedek parça",
+    "bisiklet", "spor ekipmanı", "kamp malzemesi", "oyuncak",
+    "kitap", "uçak bileti", "otobüs bileti", "otel", "konaklama",
+    "tatil paketi", "kiralama"
+)
+
+# Ticari teklif sinyali. Sadece yüzde geçen haber başlığı yeterli değil.
+OFFER_TERMS = (
+    "indirim", "kampanya", "kupon", "sepette", "fırsat",
+    "black friday", "efsane kasım", "süper fırsat", "promosyon",
+    "fiyatı düştü", "fiyat düştü", "indirimli fiyat"
+)
+
+# Yalnızca belirli gruplara açık teklifleri genel fırsat kanalına alma.
+RESTRICTED_AUDIENCE_TERMS = (
+    "emeklilere", "öğretmenlere", "öğrencilere", "üyelerine",
+    "personeline", "çalışanlarına", "memurlara", "asker ailelerine",
+    "sadece üyeler", "belirli meslek gruplarına"
 )
 
 def load_seen():
@@ -127,7 +171,7 @@ def to_number(value):
     except ValueError:
         return None
 
-def explicit_discount(text):
+def find_explicit_discount(text):
     patterns = [
         r"%\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:'e|'a|’e|’a)?\s*(?:varan|indirim)",
         r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:indirim|indirimli|tasarruf)",
@@ -138,17 +182,16 @@ def explicit_discount(text):
             try:
                 value = float(match.group(1).replace(",", "."))
                 if MIN_DISCOUNT <= value <= 99:
-                    return value, "Kaynakta açıkça belirtilen oran"
+                    return value
             except ValueError:
                 pass
-    return None, None
+    return None
 
 def price_based_discount(text):
-    # İki fiyatı ancak metinde eski/yeni fiyat ilişkisi açıkça anlatılıyorsa kıyasla.
+    # Fiyat çifti ancak eski/yeni fiyat ilişkisi açıkça yazılmışsa hesaplanır.
     markers = (
-        "yerine", "önce", "şimdi", "fiyatı düştü", "düşerek",
-        "indirildi", "eski fiyat", "yeni fiyat", "den düştü",
-        "dan düştü", "tl oldu"
+        "yerine", "önce", "şimdi", "fiyatı düştü", "fiyat düştü",
+        "düşerek", "indirildi", "eski fiyat", "yeni fiyat", "tl oldu"
     )
     if not any(marker in text.lower() for marker in markers):
         return None
@@ -157,7 +200,6 @@ def price_based_discount(text):
     if len(matches) < 2:
         return None
 
-    # Yakın iki fiyatı sırayla al; eski fiyatın yüksek olması şart.
     for first, second in zip(matches, matches[1:]):
         old_price = to_number(first.group(1))
         new_price = to_number(second.group(1))
@@ -170,6 +212,28 @@ def price_based_discount(text):
                     "new": second.group(1)
                 }
     return None
+
+def classify_offer(title, description):
+    title_lower = title.lower()
+    text_lower = (title + " " + description).lower()
+
+    if any(term in text_lower for term in NON_SHOPPING_TERMS):
+        return False, "Ekonomik/finansal haber veya alışveriş dışı konu"
+
+    if any(term in text_lower for term in RESTRICTED_AUDIENCE_TERMS):
+        return False, "Yalnızca belirli bir gruba açık kampanya"
+
+    has_product = any(term in text_lower for term in SHOPPING_TERMS)
+    has_offer = any(term in text_lower for term in OFFER_TERMS)
+
+    # Başlıkta ürün/hizmet ve teklif sinyali birlikte aranır.
+    title_has_product = any(term in title_lower for term in SHOPPING_TERMS)
+    title_has_offer = any(term in title_lower for term in OFFER_TERMS)
+
+    if not (has_product and has_offer and title_has_product and title_has_offer):
+        return False, "Başlıkta açık ürün/hizmet ve kampanya ifadesi yok"
+
+    return True, "Alışveriş kampanyası adayı"
 
 def telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -190,9 +254,11 @@ def main():
     scanned = 0
     sent = 0
     errors = 0
+    rejected = 0
     percent_candidates = 0
     price_candidates = 0
     skipped_duplicates = 0
+    limit_skipped = 0
 
     for source, feed_url in FEEDS:
         try:
@@ -201,20 +267,31 @@ def main():
             scanned += len(entries)
 
             for entry in entries:
-                text = f"{entry['title']} {entry['description']}"
-                rate, method = explicit_discount(text)
+                title = entry["title"]
+                description = entry["description"]
+                combined = f"{title} {description}"
+
+                eligible, reason = classify_offer(title, description)
+                if not eligible:
+                    rejected += 1
+                    print(f"Elendi: {title} | {reason}")
+                    continue
+
+                rate = find_explicit_discount(combined)
                 price_info = None
+                method = "Kaynakta açıkça belirtilen indirim oranı"
 
                 if rate is not None:
                     percent_candidates += 1
                 else:
-                    price_info = price_based_discount(text)
+                    price_info = price_based_discount(combined)
                     if price_info:
                         rate = price_info["rate"]
                         method = "Metindeki eski/yeni fiyatlardan hesaplandı"
                         price_candidates += 1
 
                 if rate is None or rate < MIN_DISCOUNT:
+                    rejected += 1
                     continue
 
                 key = hashlib.sha256(
@@ -225,6 +302,10 @@ def main():
                     skipped_duplicates += 1
                     continue
 
+                if sent >= MAX_ALERTS_PER_RUN:
+                    limit_skipped += 1
+                    continue
+
                 price_line = ""
                 if price_info:
                     price_line = (
@@ -233,23 +314,22 @@ def main():
                     )
 
                 message = (
-                    "🔥 İNDİRİM AVCISI TR\n\n"
-                    f"📦 {entry['title']}\n"
+                    "🛍️ İNDİRİM AVCISI TR - KAMPANYA ADAYI\n\n"
+                    f"📦 {title}\n"
                     f"📉 İndirim: %{rate:g}\n"
                     f"🧾 Tespit: {method}"
                     f"{price_line}\n\n"
                     f"🔗 {entry['link']}\n"
                     f"📡 Kaynak: {source}\n\n"
-                    "⚠️ Bu bilgi RSS/haber metninden çıkarılmıştır; "
-                    "mağaza fiyatı ve stok durumu bağımsız olarak doğrulanmamıştır. "
-                    "Satın almadan önce bağlantıdaki fiyatı kontrol et."
+                    "⚠️ Bu bir kampanya adayıdır. Fiyat, stok, tarih ve "
+                    "kampanya koşulları mağaza sayfasında doğrulanmalıdır."
                 )
 
                 try:
                     telegram(message)
                     new_seen.add(key)
                     sent += 1
-                    print(f"Bildirim gönderildi: {entry['title']}")
+                    print(f"Bildirim gönderildi: {title}")
                     time.sleep(1)
                 except Exception as exc:
                     errors += 1
@@ -264,14 +344,16 @@ def main():
     report = (
         "🕵️ İNDİRİM AVCISI TR - TARAMA RAPORU\n\n"
         f"📚 Taranan içerik: {scanned}\n"
+        f"🛍️ Alışveriş kampanyası filtresini geçen: {percent_candidates + price_candidates}\n"
         f"📊 Açık yüzde oranı bulunan: {percent_candidates}\n"
         f"🧮 Fiyat farkından hesaplanan: {price_candidates}\n"
+        f"🚫 Alışveriş dışı/uygunsuz içerik: {rejected}\n"
         f"🔁 Daha önce gönderilmiş: {skipped_duplicates}\n"
         f"📨 Yeni bildirim: {sent}\n"
+        f"⏸️ Bildirim sınırı nedeniyle bekleyen: {limit_skipped}\n"
         f"⚠️ Kaynak/gönderim hatası: {errors}\n\n"
-        "Not: Yalnızca açık RSS/haber akışları taranır. "
-        "Bu sistem mağazaların tüm ürün kataloglarını taramaz; "
-        "fiyat ve stok bilgisi satın almadan önce kontrol edilmelidir."
+        "Not: Yalnızca açık RSS/haber akışları taranır. Bildirimler kampanya "
+        "adayıdır; fiyat ve stok mağaza sayfasında doğrulanmalıdır."
     )
     print("--------------------------------")
     print(report)
