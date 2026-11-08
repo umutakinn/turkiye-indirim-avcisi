@@ -16,7 +16,7 @@ EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 if not TOKEN or not CHAT_ID:
     raise ValueError("Telegram token veya Chat ID eksik!")
 
-MIN_DISCOUNT = 5
+MIN_DISCOUNT = 10
 MAX_SEEN = 5000
 MAX_ALERTS_PER_RUN = 5
 SEEN_FILE = Path("seen.json")
@@ -27,6 +27,17 @@ FEEDS = [
 ]
 
 QUERIES = [
+    # DonanımHaber Sıcak Fırsatlar: gerçek kullanıcı/mağaza fırsat konuları
+    'site:forum.donanimhaber.com/sicak-firsatlar "TL" indirim',
+    'site:forum.donanimhaber.com/sicak-firsatlar "TL" fırsat',
+    'site:forum.donanimhaber.com "Amazon Türkiye" "TL" indirim',
+    'site:forum.donanimhaber.com "Hepsiburada" "TL" indirim',
+    'site:forum.donanimhaber.com "Trendyol" "TL" indirim',
+    'site:forum.donanimhaber.com "n11" "TL" indirim',
+    'site:forum.donanimhaber.com "telefon" "TL" kampanya',
+    'site:forum.donanimhaber.com "bilgisayar" "TL" fırsat',
+    'site:forum.donanimhaber.com "ev aletleri" "TL" indirim',
+    'site:forum.donanimhaber.com "market" "TL" kampanya',
     "Türkiye ürün indirim kampanya fırsat",
     "Trendyol ürün indirim kupon",
     "Hepsiburada ürün indirim kampanya",
