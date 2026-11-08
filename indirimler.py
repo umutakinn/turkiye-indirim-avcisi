@@ -16,7 +16,7 @@ EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 if not TOKEN or not CHAT_ID:
     raise ValueError("Telegram token veya Chat ID eksik!")
 
-MIN_DISCOUNT = 10
+MIN_DISCOUNT = 5
 MAX_SEEN = 5000
 MAX_ALERTS_PER_RUN = 5
 SEEN_FILE = Path("seen.json")
@@ -226,12 +226,13 @@ def classify_offer(title, description):
     has_product = any(term in text_lower for term in SHOPPING_TERMS)
     has_offer = any(term in text_lower for term in OFFER_TERMS)
 
-    # Başlıkta ürün/hizmet ve teklif sinyali birlikte aranır.
+    # Ürün ve kampanya sinyali metnin tamamında bulunmalı.
+    # Başlıkta bu iki sinyalden en az biri yer almalı; diğeri açıklamada olabilir.
     title_has_product = any(term in title_lower for term in SHOPPING_TERMS)
     title_has_offer = any(term in title_lower for term in OFFER_TERMS)
 
-    if not (has_product and has_offer and title_has_product and title_has_offer):
-        return False, "Başlıkta açık ürün/hizmet ve kampanya ifadesi yok"
+    if not (has_product and has_offer and (title_has_product or title_has_offer)):
+        return False, "Ürün/hizmet veya kampanya ifadesi yeterince açık değil"
 
     return True, "Alışveriş kampanyası adayı"
 
@@ -277,22 +278,22 @@ def main():
                     print(f"Elendi: {title} | {reason}")
                     continue
 
-                rate = find_explicit_discount(combined)
-                price_info = None
-                method = "Kaynakta açıkça belirtilen indirim oranı"
+                # Yüzde iddiası tek başına yeterli değil.
+                # Gerçek fırsat için eski ve yeni fiyat metinde bulunmalı.
+                explicit_rate = find_explicit_discount(combined)
+                price_info = price_based_discount(combined)
 
-                if rate is not None:
+                if explicit_rate is not None:
                     percent_candidates += 1
-                else:
-                    price_info = price_based_discount(combined)
-                    if price_info:
-                        rate = price_info["rate"]
-                        method = "Metindeki eski/yeni fiyatlardan hesaplandı"
-                        price_candidates += 1
 
-                if rate is None or rate < MIN_DISCOUNT:
+                if not price_info or price_info["rate"] < MIN_DISCOUNT:
                     rejected += 1
+                    print(f"Elendi: doğrulanabilir eski/yeni fiyat yok veya indirim %{MIN_DISCOUNT} altında | {title}")
                     continue
+
+                rate = price_info["rate"]
+                method = "Metindeki eski/yeni fiyatlardan hesaplandı"
+                price_candidates += 1
 
                 key = hashlib.sha256(
                     (source + "|" + entry["guid"]).encode("utf-8")
@@ -352,8 +353,8 @@ def main():
         f"📨 Yeni bildirim: {sent}\n"
         f"⏸️ Bildirim sınırı nedeniyle bekleyen: {limit_skipped}\n"
         f"⚠️ Kaynak/gönderim hatası: {errors}\n\n"
-        "Not: Yalnızca açık RSS/haber akışları taranır. Bildirimler kampanya "
-        "adayıdır; fiyat ve stok mağaza sayfasında doğrulanmalıdır."
+        "Not: En az %5 indirim ve metinde açık eski/yeni fiyat çifti aranır. "
+        "Yalnızca açık RSS/haber akışları taranır; fiyat ve stok mağazada doğrulanmalıdır."
     )
     print("--------------------------------")
     print(report)
