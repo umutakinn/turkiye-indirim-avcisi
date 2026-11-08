@@ -1,153 +1,100 @@
-
 import os
 import re
 import json
 import time
 import html
+import hashlib
 import urllib.request
 import urllib.parse
-import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 
 if not TOKEN or not CHAT_ID:
     raise ValueError("Telegram token veya Chat ID eksik!")
 
-SEEN_FILE = Path("seen.json")
 MIN_DISCOUNT = 10
-MAX_SEEN = 3000
+MAX_SEEN = 5000
+SEEN_FILE = Path("seen.json")
+USER_AGENT = "IndirimAvcisiTR/1.0 (+public RSS reader)"
 
-# Açık RSS kaynakları ve mağaza odaklı haber aramaları
-GOOGLE_QUERIES = [
-    "Türkiye indirim fırsat kampanya ürün",
-    "Trendyol indirim fırsat",
-    "Hepsiburada indirim fırsat",
-    "Amazon Türkiye indirim fırsat",
-    "N11 indirim fırsat",
-    "market elektronik giyim ev indirim",
-]
-
+# Kaynaklar: herkese açık RSS akışları. Erişim engeli aşılmaz.
 FEEDS = [
     ("DonanımHaber", "https://www.donanimhaber.com/rss/tum/"),
 ]
 
-for query in GOOGLE_QUERIES:
+# Google Haberler RSS: farklı kategoriler ve mağaza odaklı aramalar.
+QUERIES = [
+    "Türkiye indirim fırsat kampanya",
+    "Trendyol indirim fırsat",
+    "Hepsiburada indirim fırsat",
+    "Amazon Türkiye indirim fırsat",
+    "N11 indirim fırsat",
+    "elektronik telefon bilgisayar indirim",
+    "ev yaşam mutfak mobilya indirim",
+    "giyim ayakkabı kozmetik indirim",
+    "market süpermarket bebek ürünleri indirim",
+    "otomotiv oto aksesuar yapı market indirim",
+    "spor outdoor oyuncak kitap indirim",
+]
+
+for query in QUERIES:
     params = urllib.parse.urlencode({
         "q": query,
         "hl": "tr",
         "gl": "TR",
-        "ceid": "TR:tr"
+        "ceid": "TR:tr",
     })
     FEEDS.append((
-        "Google Haberler",
+        "Google Haberler - " + query,
         "https://news.google.com/rss/search?" + params
     ))
 
-KEYWORDS = [
-    "indirim", "fırsat", "kampanya", "fiyat düştü",
-    "ucuzladı", "indirimli fiyat", "sepette"
-]
-
-AMOUNT = (
-    r"(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?"
-    r"|\d+(?:,\d{1,2})?)\s*(?:TL|₺)"
+KEYWORDS = (
+    "indirim", "fırsat", "kampanya", "kupon", "fiyat düştü",
+    "ucuzladı", "sepette", "black friday", "efsane kasım"
 )
 
 def load_seen():
-    if SEEN_FILE.exists():
-        try:
-            data = json.loads(
-                SEEN_FILE.read_text(encoding="utf-8")
-            )
-            return set(data)
-        except Exception:
-            print("Geçmiş dosyası okunamadı, yeni liste oluşturuluyor.")
+    try:
+        if SEEN_FILE.exists():
+            values = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+            return set(values if isinstance(values, list) else [])
+    except Exception as exc:
+        print(f"Geçmiş dosyası okunamadı: {exc}")
     return set()
 
-def save_seen(seen):
-    data = sorted(seen)[-MAX_SEEN:]
+def save_seen(values):
     SEEN_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
+        json.dumps(sorted(values)[-MAX_SEEN:], ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
 
 def clean_text(value):
     value = html.unescape(value or "")
-    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"<[^>]*>", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
-def parse_price(value):
-    value = value.replace(".", "").replace(",", ".")
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-def find_price_pair(text):
-    # Önce açıkça belirtilmiş eski ve yeni fiyatları ara.
-    old_pattern = re.compile(
-        r"(?:eski fiyat|önceki fiyat|normal fiyat|liste fiyatı)"
-        r"\D{0,35}" + AMOUNT,
-        re.IGNORECASE
-    )
-    new_pattern = re.compile(
-        r"(?:yeni fiyat|indirimli fiyat|şimdiki fiyat|satış fiyatı)"
-        r"\D{0,35}" + AMOUNT,
-        re.IGNORECASE
-    )
-
-    old_match = old_pattern.search(text)
-    new_match = new_pattern.search(text)
-
-    if old_match and new_match:
-        old_price = parse_price(old_match.group(1))
-        new_price = parse_price(new_match.group(1))
-        if old_price and new_price and old_price > new_price:
-            return old_price, new_price
-
-    # "1.500 TL yerine 1.200 TL" gibi ifadeleri ara.
-    amounts = re.findall(AMOUNT, text, re.IGNORECASE)
-
-    if len(amounts) == 2 and re.search(
-        r"yerine|iken|önce|düştü|indirimli",
-        text,
-        re.IGNORECASE
-    ):
-        old_price = parse_price(amounts[0])
-        new_price = parse_price(amounts[1])
-
-        if old_price and new_price and old_price > new_price:
-            return old_price, new_price
-
-    return None
-
-def get_discount(old_price, new_price):
-    return ((old_price - new_price) / old_price) * 100
-
-def parse_feed(feed_url):
+def fetch(url):
     request = urllib.request.Request(
-        feed_url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; IndirimAvcisiTR/1.0)"
-        }
+        url,
+        headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml, text/xml"}
     )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        return response.read()
 
-    with urllib.request.urlopen(request, timeout=30) as response:
-        content = response.read()
-
-    root = ET.fromstring(content)
+def parse_feed(url):
+    root = ET.fromstring(fetch(url))
     items = []
 
-    # RSS formatı
     for item in root.findall(".//item"):
         title = clean_text(item.findtext("title"))
         link = (item.findtext("link") or "").strip()
         description = clean_text(item.findtext("description"))
         guid = (item.findtext("guid") or link or title).strip()
-
         if title and link:
             items.append({
                 "title": title,
@@ -156,30 +103,16 @@ def parse_feed(feed_url):
                 "guid": guid
             })
 
-    # Atom formatı
     ns = {"a": "http://www.w3.org/2005/Atom"}
-
     for entry in root.findall(".//a:entry", ns):
-        title = clean_text(
-            entry.findtext("a:title", namespaces=ns)
-        )
-
-        link_element = entry.find("a:link", ns)
-        link = (
-            link_element.get("href", "")
-            if link_element is not None else ""
-        )
-
+        title = clean_text(entry.findtext("a:title", namespaces=ns))
+        link_node = entry.find("a:link", ns)
+        link = link_node.get("href", "") if link_node is not None else ""
         description = clean_text(
             entry.findtext("a:summary", namespaces=ns)
             or entry.findtext("a:content", namespaces=ns)
         )
-
-        guid = (
-            entry.findtext("a:id", namespaces=ns)
-            or link or title
-        )
-
+        guid = entry.findtext("a:id", namespaces=ns) or link or title
         if title and link:
             items.append({
                 "title": title,
@@ -190,104 +123,122 @@ def parse_feed(feed_url):
 
     return items
 
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+def find_discount(text):
+    # Yalnızca içerikte açıkça yazan yüzde indirimleri kabul edilir.
+    patterns = [
+        r"%\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:'e|'a|’e|’a)?\s*(?:varan|indirim)",
+        r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:indirim|indirimli|tasarruf)",
+        r"(?:%|yüzde)\s*(\d{1,2}(?:[.,]\d+)?)"
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                value = float(match.group(1).replace(",", "."))
+                if MIN_DISCOUNT <= value <= 99:
+                    return value
+            except ValueError:
+                continue
+    return None
 
+def extract_prices(text):
+    # Fiyatlar sadece metinde açıkça varsa gösterilir; hesaplanmış gibi sunulmaz.
+    price_re = r"(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)"
+    found = re.findall(price_re, text, re.IGNORECASE)
+    return found[:2]
+
+def telegram(message):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = urllib.parse.urlencode({
         "chat_id": CHAT_ID,
         "text": message,
         "disable_web_page_preview": False
     }).encode("utf-8")
-
     request = urllib.request.Request(url, data=data)
-
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=25) as response:
         result = json.loads(response.read().decode("utf-8"))
-
     if not result.get("ok"):
-        raise RuntimeError("Telegram mesaj gönderme hatası!")
+        raise RuntimeError(f"Telegram API hatası: {result}")
 
 def main():
     seen = load_seen()
     new_seen = set(seen)
-
-    sent = 0
     scanned = 0
+    sent = 0
     errors = 0
+    eligible = 0
 
-    for source_name, feed_url in FEEDS:
+    for source, feed_url in FEEDS:
         try:
-            items = parse_feed(feed_url)
-            print(
-                f"{source_name}: {len(items)} içerik bulundu."
-            )
+            entries = parse_feed(feed_url)
+            print(f"Kaynak OK: {source} | {len(entries)} içerik")
+            scanned += len(entries)
 
-            scanned += len(items)
-
-            for item in items:
-                title = item["title"]
-                description = item["description"]
-                combined = f"{title} {description}"
-
-                if not any(
-                    word in combined.lower()
-                    for word in KEYWORDS
-                ):
+            for entry in entries:
+                combined = f"{entry['title']} {entry['description']}"
+                if not any(word in combined.lower() for word in KEYWORDS):
                     continue
 
-                price_pair = find_price_pair(combined)
-
-                # Eski ve yeni fiyat doğrulanamıyorsa gönderme.
-                if not price_pair:
+                discount = find_discount(combined)
+                if discount is None:
                     continue
 
-                old_price, new_price = price_pair
-                discount = get_discount(old_price, new_price)
+                eligible += 1
+                key = hashlib.sha256(
+                    (source + "|" + entry["guid"]).encode("utf-8")
+                ).hexdigest()
 
-                if discount < MIN_DISCOUNT:
+                if key in seen:
                     continue
 
-                key = item["guid"]
-
-                if not key or key in seen:
-                    continue
+                prices = extract_prices(combined)
+                price_line = ""
+                if prices:
+                    price_line = "\nMetinde geçen fiyat(lar): " + " / ".join(prices) + " TL"
 
                 message = (
                     "🔥 İNDİRİM AVCISI TR\n\n"
-                    f"📦 {title}\n\n"
-                    f"🏷️ Önceki fiyat: {old_price:,.2f} TL\n"
-                    f"💰 Yeni fiyat: {new_price:,.2f} TL\n"
-                    f"📉 Hesaplanan indirim: %{discount:.1f}\n\n"
-                    f"🔗 {item['link']}\n\n"
-                    f"📡 Kaynak: {source_name}\n"
-                    "⚠️ Satın almadan önce güncel fiyatı ve "
-                    "stok durumunu kontrol et."
+                    f"📦 {entry['title']}\n"
+                    f"📉 Kaynakta belirtilen indirim: %{discount:g}"
+                    f"{price_line}\n\n"
+                    f"🔗 {entry['link']}\n"
+                    f"📡 Kaynak: {source}\n\n"
+                    "ℹ️ İndirim oranı kaynak metninden alınmıştır; "
+                    "bağımsız fiyat geçmişi doğrulaması değildir. "
+                    "Satın almadan önce mağaza fiyatını kontrol et."
                 )
 
                 try:
-                    send_telegram(message)
+                    telegram(message)
                     new_seen.add(key)
                     sent += 1
-                    print(f"Bildirim gönderildi: {title}")
+                    print(f"Telegram bildirimi gönderildi: {entry['title']}")
                     time.sleep(1)
-
-                except Exception as error:
+                except Exception as exc:
                     errors += 1
-                    print(f"Telegram gönderim hatası: {error}")
+                    print(f"Telegram gönderim hatası: {exc}")
 
-        except Exception as error:
+        except Exception as exc:
             errors += 1
-            print(
-                f"Kaynak okunamadı: {source_name} | {error}"
-            )
+            print(f"Kaynak okunamadı: {source} | {exc}")
 
     save_seen(new_seen)
 
+    summary = (
+        "🕵️ İNDİRİM AVCISI TR - TARAMA RAPORU\n\n"
+        f"📚 Taranan içerik: {scanned}\n"
+        f"🔎 %{MIN_DISCOUNT} ve üzeri oran içeren içerik: {eligible}\n"
+        f"📨 Yeni Telegram bildirimi: {sent}\n"
+        f"⚠️ Kaynak/gönderim hatası: {errors}\n\n"
+        "Not: Bu sürüm açık RSS/haber akışlarını tarar; "
+        "mağazaların tüm ürün kataloglarını taradığı anlamına gelmez."
+    )
+
     print("--------------------------------")
-    print(f"Toplam taranan içerik: {scanned}")
-    print(f"Yeni fırsat bildirimi: {sent}")
-    print(f"Kaynak/gönderim hatası: {errors}")
-    print("Tarama tamamlandı.")
+    print(summary)
+
+    # Manuel Run workflow testinde mutlaka sonuç mesajı gönder.
+    if EVENT_NAME == "workflow_dispatch":
+        telegram(summary)
 
 if __name__ == "__main__":
     main()
