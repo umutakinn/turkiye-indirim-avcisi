@@ -256,6 +256,8 @@ def main():
     sent = 0
     errors = 0
     rejected = 0
+    campaign_candidates = 0
+    missing_price_pair = 0
     percent_candidates = 0
     price_candidates = 0
     skipped_duplicates = 0
@@ -278,6 +280,8 @@ def main():
                     print(f"Elendi: {title} | {reason}")
                     continue
 
+                campaign_candidates += 1
+
                 # Yüzde iddiası tek başına yeterli değil.
                 # Gerçek fırsat için eski ve yeni fiyat metinde bulunmalı.
                 explicit_rate = find_explicit_discount(combined)
@@ -287,8 +291,8 @@ def main():
                     percent_candidates += 1
 
                 if not price_info or price_info["rate"] < MIN_DISCOUNT:
-                    rejected += 1
-                    print(f"Elendi: doğrulanabilir eski/yeni fiyat yok veya indirim %{MIN_DISCOUNT} altında | {title}")
+                    missing_price_pair += 1
+                    print(f"Fırsat adayı: doğrulanabilir eski/yeni fiyat yok veya indirim %{MIN_DISCOUNT} altında | {title}")
                     continue
 
                 rate = price_info["rate"]
